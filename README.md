@@ -110,7 +110,7 @@ Animated typing indicator appears
 
 Response appears with mode indicator showing: Mode: RAG | X chunks processed
 
-# 6.1 Chat Modes Explained
+# 5.1 Chat Modes Explained
 🔍 RAG Mode (Recommended)
 Uses your uploaded document as context
 
