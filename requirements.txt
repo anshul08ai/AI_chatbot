@@ -1,0 +1,12 @@
+flask
+langchain
+langchain-community
+langchain-openai
+langchain-huggingface
+sentence-transformers
+pypdf
+python-dotenv
+huggingface_hub
+openai
+pinecone
+pinecone-client==5.0.0

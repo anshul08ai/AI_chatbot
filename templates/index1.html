@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple RAG App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style1.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fas fa-robot"></i> Real-time RAG Document Assistant</h1>
+            <p>Upload documents - processing happens immediately. Chat is disabled until processing completes.</p>
+        </div>
+
+        <!-- Document Upload Section -->
+        <div class="upload-section">
+            <h2 class="section-title"><i class="fas fa-upload"></i> Upload & Process Document</h2>
+            
+            <div class="form-group">
+                <label for="modelType">Select Embedding Model:</label>
+                <select id="modelType" class="select-control">
+                    <option value="huggingface">HuggingFace</option>
+                    <option value="azure">Azure OpenAI</option>
+                </select>
+            </div>
+
+            <div class="upload-area">
+                <i class="fas fa-cloud-upload-alt" style="font-size: 36px; color: #667eea; margin-bottom: 10px;"></i>
+                <h3>Upload PDF Document</h3>
+                <p>Document will be processed immediately after upload</p>
+                <input type="file" id="fileInput" accept=".pdf" style="display: none;">
+                <button type="button" class="btn" onclick="document.getElementById('fileInput').click()" style="width: auto; margin-top: 15px;">
+                    Choose File
+                </button>
+                <div id="fileName" style="margin-top: 10px; color: #666;">No file chosen</div>
+            </div>
+
+            <button type="button" id="uploadBtn" class="btn">
+                <i class="fas fa-upload"></i> Upload & Process Document
+            </button>
+
+            <button type="button" id="clearBtn" class="btn btn-clear">
+                <i class="fas fa-trash"></i> Clear Current Document
+            </button>
+
+            <div id="uploadStatus"></div>
+        </div>
+
+        <!-- Chat Section -->
+        <div class="chat-section">
+            <h2 class="section-title"><i class="fas fa-comments"></i> Chat</h2>
+            
+            <div class="form-group">
+                <label for="chatModelType">Select AI Model:</label>
+                <select id="chatModelType" class="select-control">
+                    <option value="huggingface">HuggingFace Mistral-7B</option>
+                    <option value="azure">Azure OpenAI GPT-4</option>
+                </select>
+            </div>
+
+            <div class="checkbox-group">
+                <input type="checkbox" id="useRag" checked>
+                <label for="useRag">Enable RAG (Use document context)</label>
+            </div>
+
+            <div id="statusInfo" class="status-info status-none">
+                <i class="fas fa-info-circle"></i> No document uploaded yet
+            </div>
+
+            <div class="chat-messages" id="chatMessages">
+                <div class="message bot-message">
+                    Hello! Upload and process a PDF document to enable RAG functionality. 
+                    The chat will be disabled until document processing is complete.
+                </div>
+            </div>
+
+            <div class="form-group">
+                <input type="text" id="questionInput" class="form-control" placeholder="Please upload and process a document first..." disabled style="margin-bottom: 10px;">
+                <button type="button" id="chatBtn" class="btn" disabled>
+                    <i class="fas fa-paper-plane"></i> Send Message (Disabled)
+                </button>
+            </div>
+
+            <div id="modeIndicator" class="mode-indicator"></div>
+        </div>
+    </div>
+
+    <!-- Processing Overlay -->
+    <div id="processingOverlay" class="processing-overlay" style="display: none;">
+        <div class="processing-content">
+            <div class="spinner"></div>
+            <h3>Processing Document</h3>
+            <p>Please wait while we process your document...</p>
+            <div class="progress-info">
+                <i class="fas fa-sync fa-spin"></i> Creating chunks and embeddings
+            </div>
+            <p><small>This may take a few moments depending on the document size.</small></p>
+            <p><small>Chat will be enabled automatically when processing completes.</small></p>
+        </div>
+    </div>
+    <script>
+    class SimpleRAGApp {
+        constructor() {
+            this.lastStatus = {
+                processing_in_progress: false,
+                vector_store_ready: false,
+                filename: null,
+                chunks_processed: 0
+            };
+            this.waitingForResponse = false; // New flag to track response state
+            this.init();
+            this.checkStatus();
+            setInterval(() => this.checkStatus(), 2000); // Check status every 2 seconds
+        }
+
+        init() {
+            this.bindEvents();
+        }
+
+        bindEvents() {
+            // File upload
+            document.getElementById('fileInput').addEventListener('change', (e) => {
+                this.handleFileSelect(e);
+            });
+
+            // Upload button
+            document.getElementById('uploadBtn').addEventListener('click', () => {
+                this.handleUpload();
+            });
+
+            // Clear button
+            document.getElementById('clearBtn').addEventListener('click', () => {
+                this.handleClear();
+            });
+
+            // Chat button
+            document.getElementById('chatBtn').addEventListener('click', () => {
+                this.handleChat();
+            });
+
+            // Enter key in chat input
+            document.getElementById('questionInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    this.handleChat();
+                }
+            });
+
+            // RAG checkbox change
+            document.getElementById('useRag').addEventListener('change', (e) => {
+                this.updateChatInterface();
+            });
+        }
+
+        handleFileSelect(e) {
+            const file = e.target.files[0];
+            const fileName = document.getElementById('fileName');
+            if (file) {
+                fileName.textContent = file.name;
+            }
+        }
+
+        async handleUpload() {
+            const fileInput = document.getElementById('fileInput');
+            const modelType = document.getElementById('modelType').value;
+            const uploadBtn = document.getElementById('uploadBtn');
+            const uploadStatus = document.getElementById('uploadStatus');
+
+            if (!fileInput.files[0]) {
+                this.showAlert('Please select a PDF file to upload.', 'error', uploadStatus);
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('model_type', modelType);
+
+            try {
+                uploadBtn.disabled = true;
+                uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+                this.showProcessingOverlay();
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    this.showAlert(`Document "${data.filename}" is now being processed...`, 'info', uploadStatus);
+                    fileInput.value = '';
+                    document.getElementById('fileName').textContent = 'No file chosen';
+                    
+                    // Force immediate status check
+                    setTimeout(() => this.checkStatus(), 1000);
+                } else {
+                    throw new Error(data.error || 'Upload failed');
+                }
+            } catch (error) {
+                this.showAlert(error.message, 'error', uploadStatus);
+                this.hideProcessingOverlay();
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload & Process Document';
+            }
+        }
+
+        async handleClear() {
+            try {
+                const response = await fetch('/clear', {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    this.showAlert('Document cleared successfully. You can upload a new document.', 'success', document.getElementById('uploadStatus'));
+                    this.lastStatus = {
+                        processing_in_progress: false,
+                        vector_store_ready: false,
+                        filename: null,
+                        chunks_processed: 0
+                    };
+                    this.updateChatInterface();
+                } else {
+                    throw new Error(data.error || 'Clear failed');
+                }
+            } catch (error) {
+                this.showAlert(error.message, 'error', document.getElementById('uploadStatus'));
+            }
+        }
+
+        async handleChat() {
+            if (this.waitingForResponse) {
+                return; // Prevent multiple simultaneous requests
+            }
+
+            const questionInput = document.getElementById('questionInput');
+            const modelType = document.getElementById('chatModelType').value;
+            const useRag = document.getElementById('useRag').checked;
+            const chatBtn = document.getElementById('chatBtn');
+            const question = questionInput.value.trim();
+
+            if (!question) {
+                return;
+            }
+
+            try {
+                // Set waiting state
+                this.waitingForResponse = true;
+                this.setResponseWaitingState(true);
+
+                // Add user message
+                this.addMessage(question, 'user');
+
+                // Add typing indicator
+                this.addTypingIndicator();
+
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        question: question,
+                        model_type: modelType,
+                        use_rag: useRag
+                    })
+                });
+
+                // Remove typing indicator
+                this.removeTypingIndicator();
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    this.addMessage(data.answer, 'bot');
+                    let modeText = `Mode: ${data.mode}`;
+                    if (data.chunks_processed) {
+                        modeText += ` | ${data.chunks_processed} chunks processed`;
+                    }
+                    if (data.document_name) {
+                        modeText += ` | Document: ${data.document_name}`;
+                    }
+                    document.getElementById('modeIndicator').textContent = modeText;
+                } else {
+                    throw new Error(data.error || 'Chat failed');
+                }
+            } catch (error) {
+                this.removeTypingIndicator();
+                this.addMessage('Sorry, I encountered an error: ' + error.message, 'bot');
+            } finally {
+                // Reset waiting state
+                this.waitingForResponse = false;
+                this.setResponseWaitingState(false);
+                
+                // Re-enable based on current status
+                this.updateChatInterface();
+                questionInput.value = '';
+                questionInput.focus();
+            }
+        }
+
+        setResponseWaitingState(isWaiting) {
+            const questionInput = document.getElementById('questionInput');
+            const chatBtn = document.getElementById('chatBtn');
+            
+            if (isWaiting) {
+                questionInput.disabled = true;
+                questionInput.placeholder = "Waiting for response...";
+                chatBtn.disabled = true;
+                chatBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+            } else {
+                // Will be properly set by updateChatInterface based on document status
+                this.updateChatInterface();
+            }
+        }
+
+        addTypingIndicator() {
+            const chatMessages = document.getElementById('chatMessages');
+            const typingDiv = document.createElement('div');
+            typingDiv.id = 'typingIndicator';
+            typingDiv.className = 'message bot-message typing-indicator';
+            typingDiv.innerHTML = `
+                <div class="typing-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+                <span class="typing-text">AI is thinking...</span>
+            `;
+            
+            chatMessages.appendChild(typingDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        removeTypingIndicator() {
+            const typingIndicator = document.getElementById('typingIndicator');
+            if (typingIndicator) {
+                typingIndicator.remove();
+            }
+        }
+
+        async checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                
+                // Update last status
+                this.lastStatus = data;
+                this.updateStatusDisplay(data);
+                
+                // Only update chat interface if not waiting for response
+                if (!this.waitingForResponse) {
+                    this.updateChatInterface();
+                }
+                
+                return data;
+            } catch (error) {
+                console.error('Error checking status:', error);
+                const errorStatus = {
+                    processing_in_progress: false,
+                    vector_store_ready: false,
+                    filename: null,
+                    chunks_processed: 0
+                };
+                this.lastStatus = errorStatus;
+                this.updateStatusDisplay(errorStatus);
+                
+                if (!this.waitingForResponse) {
+                    this.updateChatInterface();
+                }
+                
+                return errorStatus;
+            }
+        }
+
+        updateStatusDisplay(status) {
+            const statusInfo = document.getElementById('statusInfo');
+            
+            if (status.processing_in_progress) {
+                statusInfo.className = 'status-info status-processing';
+                statusInfo.innerHTML = `<i class="fas fa-sync fa-spin"></i> Processing document: ${status.filename || 'Unknown'}`;
+                this.showProcessingOverlay();
+            } else if (status.vector_store_ready) {
+                statusInfo.className = 'status-info status-ready';
+                const chunksText = status.chunks_processed ? ` (${status.chunks_processed} chunks processed)` : '';
+                statusInfo.innerHTML = `<i class="fas fa-check-circle"></i> Ready: ${status.filename || 'Document'}${chunksText}`;
+                this.hideProcessingOverlay();
+                
+                // Add success message to chat if this is the first time it's ready
+                if (!this.wasReady && status.filename) {
+                    this.addMessage(`Document "${status.filename}" has been processed successfully! You can now ask questions about it using RAG.`, 'bot');
+                    this.wasReady = true;
+                }
+            } else {
+                statusInfo.className = 'status-info status-none';
+                statusInfo.innerHTML = '<i class="fas fa-info-circle"></i> No document processed yet';
+                this.hideProcessingOverlay();
+                this.wasReady = false;
+            }
+        }
+
+        updateChatInterface() {
+            // Don't update if waiting for response
+            if (this.waitingForResponse) {
+                return;
+            }
+
+            const status = this.lastStatus;
+            const questionInput = document.getElementById('questionInput');
+            const chatBtn = document.getElementById('chatBtn');
+            const useRag = document.getElementById('useRag').checked;
+            
+            console.log('Updating chat interface with status:', status);
+            
+            if (status.processing_in_progress) {
+                // Processing in progress - disable everything
+                questionInput.disabled = true;
+                questionInput.placeholder = "Processing document... Please wait";
+                chatBtn.disabled = true;
+                chatBtn.innerHTML = '<i class="fas fa-clock"></i> Processing...';
+            } else if (status.vector_store_ready) {
+                // Document ready - enable chat
+                questionInput.disabled = false;
+                if (useRag) {
+                    questionInput.placeholder = "Ask a question about your document...";
+                } else {
+                    questionInput.placeholder = "Ask a general question...";
+                }
+                chatBtn.disabled = false;
+                chatBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Message';
+            } else {
+                // No document - disable chat
+                questionInput.disabled = true;
+                questionInput.placeholder = "Please upload and process a document first...";
+                chatBtn.disabled = true;
+                chatBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Message (Disabled)';
+            }
+        }
+
+        showProcessingOverlay() {
+            document.getElementById('processingOverlay').style.display = 'flex';
+        }
+
+        hideProcessingOverlay() {
+            document.getElementById('processingOverlay').style.display = 'none';
+        }
+
+        addMessage(content, sender) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}-message`;
+            messageDiv.textContent = content;
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        showAlert(message, type, container) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type}`;
+            alertDiv.textContent = message;
+
+            container.innerHTML = '';
+            container.appendChild(alertDiv);
+
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    alertDiv.remove();
+                }, 5000);
+            }
+        }
+    }
+
+    // Initialize app when DOM is loaded
+    document.addEventListener('DOMContentLoaded', () => {
+        new SimpleRAGApp();
+    });
+</script>
+
+    <!-- <script>
+    class SimpleRAGApp {
+        constructor() {
+            this.lastStatus = {
+                processing_in_progress: false,
+                vector_store_ready: false,
+                filename: null,
+                chunks_processed: 0
+            };
+            this.init();
+            this.checkStatus();
+            setInterval(() => this.checkStatus(), 2000); // Check status every 2 seconds
+        }
+
+        init() {
+            this.bindEvents();
+        }
+
+        bindEvents() {
+            // File upload
+            document.getElementById('fileInput').addEventListener('change', (e) => {
+                this.handleFileSelect(e);
+            });
+
+            // Upload button
+            document.getElementById('uploadBtn').addEventListener('click', () => {
+                this.handleUpload();
+            });
+
+            // Clear button
+            document.getElementById('clearBtn').addEventListener('click', () => {
+                this.handleClear();
+            });
+
+            // Chat button
+            document.getElementById('chatBtn').addEventListener('click', () => {
+                this.handleChat();
+            });
+
+            // Enter key in chat input
+            document.getElementById('questionInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    this.handleChat();
+                }
+            });
+
+            // RAG checkbox change
+            document.getElementById('useRag').addEventListener('change', (e) => {
+                this.updateChatInterface();
+            });
+        }
+
+        handleFileSelect(e) {
+            const file = e.target.files[0];
+            const fileName = document.getElementById('fileName');
+            if (file) {
+                fileName.textContent = file.name;
+            }
+        }
+
+        async handleUpload() {
+            const fileInput = document.getElementById('fileInput');
+            const modelType = document.getElementById('modelType').value;
+            const uploadBtn = document.getElementById('uploadBtn');
+            const uploadStatus = document.getElementById('uploadStatus');
+
+            if (!fileInput.files[0]) {
+                this.showAlert('Please select a PDF file to upload.', 'error', uploadStatus);
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('model_type', modelType);
+
+            try {
+                uploadBtn.disabled = true;
+                uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+                this.showProcessingOverlay();
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    this.showAlert(`Document "${data.filename}" is now being processed...`, 'info', uploadStatus);
+                    fileInput.value = '';
+                    document.getElementById('fileName').textContent = 'No file chosen';
+                    
+                    // Force immediate status check
+                    setTimeout(() => this.checkStatus(), 1000);
+                } else {
+                    throw new Error(data.error || 'Upload failed');
+                }
+            } catch (error) {
+                this.showAlert(error.message, 'error', uploadStatus);
+                this.hideProcessingOverlay();
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload & Process Document';
+            }
+        }
+
+        async handleClear() {
+            try {
+                const response = await fetch('/clear', {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    this.showAlert('Document cleared successfully. You can upload a new document.', 'success', document.getElementById('uploadStatus'));
+                    this.lastStatus = {
+                        processing_in_progress: false,
+                        vector_store_ready: false,
+                        filename: null,
+                        chunks_processed: 0
+                    };
+                    this.updateChatInterface();
+                } else {
+                    throw new Error(data.error || 'Clear failed');
+                }
+            } catch (error) {
+                this.showAlert(error.message, 'error', document.getElementById('uploadStatus'));
+            }
+        }
+
+        async handleChat() {
+            const questionInput = document.getElementById('questionInput');
+            const modelType = document.getElementById('chatModelType').value;
+            const useRag = document.getElementById('useRag').checked;
+            const chatBtn = document.getElementById('chatBtn');
+            const question = questionInput.value.trim();
+
+            if (!question) {
+                return;
+            }
+
+            try {
+                chatBtn.disabled = true;
+                chatBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Thinking...';
+                questionInput.disabled = true;
+
+                // Add user message
+                this.addMessage(question, 'user');
+
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        question: question,
+                        model_type: modelType,
+                        use_rag: useRag
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    this.addMessage(data.answer, 'bot');
+                    let modeText = `Mode: ${data.mode}`;
+                    if (data.chunks_processed) {
+                        modeText += ` | ${data.chunks_processed} chunks processed`;
+                    }
+                    if (data.document_name) {
+                        modeText += ` | Document: ${data.document_name}`;
+                    }
+                    document.getElementById('modeIndicator').textContent = modeText;
+                } else {
+                    throw new Error(data.error || 'Chat failed');
+                }
+            } catch (error) {
+                this.addMessage('Sorry, I encountered an error: ' + error.message, 'bot');
+            } finally {
+                // Re-enable based on current status
+                this.updateChatInterface();
+                questionInput.value = '';
+                questionInput.focus();
+            }
+        }
+
+        async checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                
+                // Update last status
+                this.lastStatus = data;
+                this.updateStatusDisplay(data);
+                this.updateChatInterface();
+                
+                return data;
+            } catch (error) {
+                console.error('Error checking status:', error);
+                const errorStatus = {
+                    processing_in_progress: false,
+                    vector_store_ready: false,
+                    filename: null,
+                    chunks_processed: 0
+                };
+                this.lastStatus = errorStatus;
+                this.updateStatusDisplay(errorStatus);
+                this.updateChatInterface();
+                return errorStatus;
+            }
+        }
+
+        updateStatusDisplay(status) {
+            const statusInfo = document.getElementById('statusInfo');
+            
+            if (status.processing_in_progress) {
+                statusInfo.className = 'status-info status-processing';
+                statusInfo.innerHTML = `<i class="fas fa-sync fa-spin"></i> Processing document: ${status.filename || 'Unknown'}`;
+                this.showProcessingOverlay();
+            } else if (status.vector_store_ready) {
+                statusInfo.className = 'status-info status-ready';
+                const chunksText = status.chunks_processed ? ` (${status.chunks_processed} chunks processed)` : '';
+                statusInfo.innerHTML = `<i class="fas fa-check-circle"></i> Ready: ${status.filename || 'Document'}${chunksText}`;
+                this.hideProcessingOverlay();
+                
+                // Add success message to chat if this is the first time it's ready
+                if (!this.wasReady && status.filename) {
+                    this.addMessage(`Document "${status.filename}" has been processed successfully! You can now ask questions about it using RAG.`, 'bot');
+                    this.wasReady = true;
+                }
+            } else {
+                statusInfo.className = 'status-info status-none';
+                statusInfo.innerHTML = '<i class="fas fa-info-circle"></i> No document processed yet';
+                this.hideProcessingOverlay();
+                this.wasReady = false;
+            }
+        }
+
+        updateChatInterface() {
+            const status = this.lastStatus;
+            const questionInput = document.getElementById('questionInput');
+            const chatBtn = document.getElementById('chatBtn');
+            const useRag = document.getElementById('useRag').checked;
+            
+            console.log('Updating chat interface with status:', status); // Debug log
+            
+            if (status.processing_in_progress) {
+                // Processing in progress - disable everything
+                questionInput.disabled = true;
+                questionInput.placeholder = "Processing document... Please wait";
+                chatBtn.disabled = true;
+                chatBtn.innerHTML = '<i class="fas fa-clock"></i> Processing...';
+            } else if (status.vector_store_ready) {
+                // Document ready - enable chat
+                questionInput.disabled = false;
+                if (useRag) {
+                    questionInput.placeholder = "Ask a question about your document...";
+                } else {
+                    questionInput.placeholder = "Ask a general question...";
+                }
+                chatBtn.disabled = false;
+                chatBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Message';
+            } else {
+                // No document - disable chat
+                questionInput.disabled = true;
+                questionInput.placeholder = "Please upload and process a document first...";
+                chatBtn.disabled = true;
+                chatBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Message (Disabled)';
+            }
+        }
+
+        showProcessingOverlay() {
+            document.getElementById('processingOverlay').style.display = 'flex';
+        }
+
+        hideProcessingOverlay() {
+            document.getElementById('processingOverlay').style.display = 'none';
+        }
+
+        addMessage(content, sender) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}-message`;
+            messageDiv.textContent = content;
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        showAlert(message, type, container) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type}`;
+            alertDiv.textContent = message;
+
+            container.innerHTML = '';
+            container.appendChild(alertDiv);
+
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    alertDiv.remove();
+                }, 5000);
+            }
+        }
+    }
+
+    // Initialize app when DOM is loaded
+    document.addEventListener('DOMContentLoaded', () => {
+        new SimpleRAGApp();
+    });
+</script> -->
+
+    <!-- <script>
+        class SimpleRAGApp {
+            constructor() {
+                this.init();
+                this.checkStatus();
+                setInterval(() => this.checkStatus(), 2000); // Check status every 2 seconds
+            }
+
+            init() {
+                this.bindEvents();
+            }
+
+            bindEvents() {
+                // File upload
+                document.getElementById('fileInput').addEventListener('change', (e) => {
+                    this.handleFileSelect(e);
+                });
+
+                // Upload button
+                document.getElementById('uploadBtn').addEventListener('click', () => {
+                    this.handleUpload();
+                });
+
+                // Clear button
+                document.getElementById('clearBtn').addEventListener('click', () => {
+                    this.handleClear();
+                });
+
+                // Chat button
+                document.getElementById('chatBtn').addEventListener('click', () => {
+                    this.handleChat();
+                });
+
+                // Enter key in chat input
+                document.getElementById('questionInput').addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        this.handleChat();
+                    }
+                });
+
+                // RAG checkbox change
+                document.getElementById('useRag').addEventListener('change', (e) => {
+                    this.updateChatInterface();
+                });
+            }
+
+            handleFileSelect(e) {
+                const file = e.target.files[0];
+                const fileName = document.getElementById('fileName');
+                if (file) {
+                    fileName.textContent = file.name;
+                }
+            }
+
+            async handleUpload() {
+                const fileInput = document.getElementById('fileInput');
+                const modelType = document.getElementById('modelType').value;
+                const uploadBtn = document.getElementById('uploadBtn');
+                const uploadStatus = document.getElementById('uploadStatus');
+
+                if (!fileInput.files[0]) {
+                    this.showAlert('Please select a PDF file to upload.', 'error', uploadStatus);
+                    return;
+                }
+
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+                formData.append('model_type', modelType);
+
+                try {
+                    uploadBtn.disabled = true;
+                    uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+                    this.showProcessingOverlay();
+
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.showAlert(`Document "${data.filename}" is now being processed...`, 'info', uploadStatus);
+                        fileInput.value = '';
+                        document.getElementById('fileName').textContent = 'No file chosen';
+                    } else {
+                        throw new Error(data.error || 'Upload failed');
+                    }
+                } catch (error) {
+                    this.showAlert(error.message, 'error', uploadStatus);
+                    this.hideProcessingOverlay();
+                } finally {
+                    uploadBtn.disabled = false;
+                    uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload & Process Document';
+                }
+            }
+
+            async handleClear() {
+                try {
+                    const response = await fetch('/clear', {
+                        method: 'POST'
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.showAlert('Document cleared successfully. You can upload a new document.', 'success', document.getElementById('uploadStatus'));
+                        this.updateChatInterface();
+                    } else {
+                        throw new Error(data.error || 'Clear failed');
+                    }
+                } catch (error) {
+                    this.showAlert(error.message, 'error', document.getElementById('uploadStatus'));
+                }
+            }
+
+            async handleChat() {
+                const questionInput = document.getElementById('questionInput');
+                const modelType = document.getElementById('chatModelType').value;
+                const useRag = document.getElementById('useRag').checked;
+                const chatBtn = document.getElementById('chatBtn');
+                const question = questionInput.value.trim();
+
+                if (!question) {
+                    return;
+                }
+
+                try {
+                    chatBtn.disabled = true;
+                    chatBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Thinking...';
+                    questionInput.disabled = true;
+
+                    // Add user message
+                    this.addMessage(question, 'user');
+
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            question: question,
+                            model_type: modelType,
+                            use_rag: useRag
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.addMessage(data.answer, 'bot');
+                        let modeText = `Mode: ${data.mode}`;
+                        if (data.chunks_processed) {
+                            modeText += ` | ${data.chunks_processed} chunks processed`;
+                        }
+                        if (data.document_name) {
+                            modeText += ` | Document: ${data.document_name}`;
+                        }
+                        document.getElementById('modeIndicator').textContent = modeText;
+                    } else {
+                        throw new Error(data.error || 'Chat failed');
+                    }
+                } catch (error) {
+                    this.addMessage('Sorry, I encountered an error: ' + error.message, 'bot');
+                } finally {
+                    this.updateChatInterface();
+                    questionInput.value = '';
+                    questionInput.focus();
+                }
+            }
+
+            async checkStatus() {
+                try {
+                    const response = await fetch('/status');
+                    const data = await response.json();
+                    
+                    this.updateStatusDisplay(data);
+                    return data;
+                } catch (error) {
+                    console.error('Error checking status:', error);
+                    return {
+                        processing_in_progress: false,
+                        vector_store_ready: false,
+                        filename: null,
+                        chunks_processed: 0
+                    };
+                }
+            }
+
+            updateStatusDisplay(status) {
+                const statusInfo = document.getElementById('statusInfo');
+                
+                if (status.processing_in_progress) {
+                    statusInfo.className = 'status-info status-processing';
+                    statusInfo.innerHTML = `<i class="fas fa-sync fa-spin"></i> Processing document: ${status.filename}`;
+                    this.showProcessingOverlay();
+                } else if (status.vector_store_ready) {
+                    statusInfo.className = 'status-info status-ready';
+                    statusInfo.innerHTML = `<i class="fas fa-check-circle"></i> Ready: ${status.filename} (${status.chunks_processed} chunks processed)`;
+                    this.hideProcessingOverlay();
+                    
+                    // Add success message to chat if this is the first time it's ready
+                    if (!this.wasReady) {
+                        this.addMessage(`Document "${status.filename}" has been processed successfully! You can now ask questions about it using RAG.`, 'bot');
+                        this.wasReady = true;
+                    }
+                } else {
+                    statusInfo.className = 'status-info status-none';
+                    statusInfo.innerHTML = '<i class="fas fa-info-circle"></i> No document processed yet';
+                    this.hideProcessingOverlay();
+                    this.wasReady = false;
+                }
+
+                this.updateChatInterface();
+            }
+
+            updateChatInterface() {
+                const status = this.lastStatus || {
+                    processing_in_progress: false,
+                    vector_store_ready: false
+                };
+                
+                const questionInput = document.getElementById('questionInput');
+                const chatBtn = document.getElementById('chatBtn');
+                const useRag = document.getElementById('useRag').checked;
+                
+                if (status.processing_in_progress) {
+                    // Processing in progress - disable everything
+                    questionInput.disabled = true;
+                    questionInput.placeholder = "Processing document... Please wait";
+                    chatBtn.disabled = true;
+                    chatBtn.innerHTML = '<i class="fas fa-clock"></i> Processing...';
+                } else if (status.vector_store_ready) {
+                    // Document ready - enable chat
+                    questionInput.disabled = false;
+                    if (useRag) {
+                        questionInput.placeholder = "Ask a question about your document...";
+                    } else {
+                        questionInput.placeholder = "Ask a general question...";
+                    }
+                    chatBtn.disabled = false;
+                    chatBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Message';
+                } else {
+                    // No document - disable chat
+                    questionInput.disabled = true;
+                    questionInput.placeholder = "Please upload and process a document first...";
+                    chatBtn.disabled = true;
+                    chatBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Message (Disabled)';
+                }
+            }
+
+            showProcessingOverlay() {
+                document.getElementById('processingOverlay').style.display = 'flex';
+            }
+
+            hideProcessingOverlay() {
+                document.getElementById('processingOverlay').style.display = 'none';
+            }
+
+            addMessage(content, sender) {
+                const chatMessages = document.getElementById('chatMessages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}-message`;
+                messageDiv.textContent = content;
+                
+                chatMessages.appendChild(messageDiv);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+
+            showAlert(message, type, container) {
+                const alertDiv = document.createElement('div');
+                alertDiv.className = `alert alert-${type}`;
+                alertDiv.textContent = message;
+
+                container.innerHTML = '';
+                container.appendChild(alertDiv);
+
+                if (type === 'success' || type === 'info') {
+                    setTimeout(() => {
+                        alertDiv.remove();
+                    }, 5000);
+                }
+            }
+        }
+
+        // Initialize app when DOM is loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            new SimpleRAGApp();
+        });
+    </script> -->
+</body>
+</html>
